@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AML
 //go:build !remote
 
 package libpod
