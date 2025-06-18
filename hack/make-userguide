@@ -1,0 +1,326 @@
+#!/usr/bin/env python
+
+# This scripts creates a Retrieval-Augmented Generation (RAG) system that
+# allows a local language model to generate high-quality, structured
+# documentation (like a Podman user guide), based on scattered sources
+# like man pages and other documentation.
+#
+# This script contains much more comments that its needed, so it can also
+# be used as a learning resource.
+
+from pathlib import Path
+from pprint import pprint
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import faiss
+import subprocess
+import json
+from openai import OpenAI
+from mistralai import Mistral
+import argparse
+import os
+
+
+client_mistral = Mistral(api_key = os.environ["MISTRAL_API_KEY"])
+
+client = OpenAI(
+    # defaults to os.environ.get("OPENAI_API_KEY")
+)
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run RAG-based doc generation using ChatGPT, Mistral, or Ollama."
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        choices=["chatgpt", "mistral", "ollama"],
+        required=True,
+        help="Which LLM provider to use (chatgpt, mistral, ollama)."
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Specify the model name for the selected provider."
+    )
+    parser.add_argument(
+        "query",
+        type=str,
+        help="The user query or documentation section to generate."
+    )
+    parser.add_argument(
+        "--update",
+        type=bool,
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Updates the already generated user-guide."
+    )
+    return parser.parse_args()
+
+
+
+def load_and_chunk_docs(folder, chunk_size=500, overlap=100):
+    chunks = []
+    for ext in [".md", ".rst"]:
+        for file in Path(folder).glob(f"*{ext}"):
+            print("   ", file)
+            text = file.read_text()
+            for i in range(0, len(text), chunk_size - overlap):
+                chunk = text[i:i + chunk_size]
+                chunks.append((file.name, chunk))
+    return chunks
+
+
+def run_mistral(user_message, model="mistral-large-latest"):
+    messages = [
+        {
+            "role": "user", "content": user_message
+        }
+    ]
+    chat_response = client_mistral.chat.complete(
+        model=model,
+        messages=messages
+    )
+    return (chat_response.choices[0].message.content)
+
+
+def run_chatgpt(user_message, model="gpt-4-turbo"):
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a technical writer generating clear, accurate user guide documentation for Linux command-line tools like Podman."
+        },
+        {
+            "role": "user",
+            "content": user_message
+        }
+    ]
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages
+    )
+    return response.choices[0].message.content.strip()
+
+
+def run_ollama(user_message, model="mixtral:8x7b-text-v0.1-q2_K"):
+    result = subprocess.run(
+        ["ollama", "run", "mixtral:8x7b-text-v0.1-q2_K"],
+        input=user_message,
+        capture_output=True,
+        text=True
+    )
+    print(result.stderr)
+    return result.stdout
+
+
+def ask_ai(model, index, chunk_id_to_text, query):
+    # Query the Index by encoding a question into a vector and ask FAISS to find the most
+    # similar chunks from the man pages.
+    # This is needed, because we don’t want to dump all of our documentation into the LLM every time -
+    # the LLM would not manage that much info.
+    # Instead, we give it only the top 3–5 most relevant pieces of information, based on semantic similarity.
+    print("Generating answer...")
+    query_embedding = model.encode([query], normalize_embeddings=True)
+    D, I = index.search(np.array(query_embedding), k=15)  # Top 5 results
+
+    # Get the text
+    retrieved_chunks = [chunk_id_to_text[i] for i in I[0]]
+    retrieved_chunks = "\n".join(retrieved_chunks)
+
+    prompt = f"""
+You are technical writer. Your overall task is to write a user-guide for podman.
+In this response, write a markdown-formatted section including:
+- {query}
+
+Do not write anything other than that - any different topic.
+Presume that the h1 heading already exists above the output you generate.
+Use h2 headings if more structure is needed.
+
+# Podman documentation for additional context:
+
+{retrieved_chunks}
+"""
+
+    print(prompt)
+
+
+    print("===============")
+    print("RESPONSE")
+    print("===============")
+    print()
+
+    if args.provider == "chatgpt":
+        return run_chatgpt(prompt, model=selected_model)
+    elif args.provider == "mistral":
+        return run_mistral(prompt, model=selected_model)
+    elif args.provider == "ollama":
+        return run_ollama(prompt, model=selected_model)
+
+
+def ask_ai_update(model, index, chunk_id_to_text, chapter):
+    print("Generating answer...")
+    query_embedding = model.encode([chapter], normalize_embeddings=True)
+    D, I = index.search(np.array(query_embedding), k=15)  # Top 5 results
+
+    # Get the text
+    retrieved_chunks = [chunk_id_to_text[i] for i in I[0]]
+    retrieved_chunks = "\n".join(retrieved_chunks)
+
+    prompt = f"""
+You are technical writer. Your overall task is to update the user-guide for podman to match the depreated or updated content from new podman version.
+Do NOT change the wording, only change important facts when needed. Do NOT add anything to the chapter unless it is introduced by new Podman version.
+Do NOT use the "```markdown" in the output. If you want to do some changes, just do them in-place. Do NOT mention new flags.
+Do NOT mention the changes you have done
+
+!The chapter is here and ends with "ENDOF" string. Everything after ENDOF should not be directly included in the output.
+
+{chapter}
+ENDOF
+
+!Here are the current man pages and other documentation which can be used to find out issues in the chapter and update it:
+
+{retrieved_chunks}
+"""
+
+    # print(prompt)
+
+
+    # print("===============")
+    # print("RESPONSE")
+    # print("===============")
+    # print()
+
+    if args.provider == "chatgpt":
+        return run_chatgpt(prompt, model=selected_model)
+    elif args.provider == "mistral":
+        return run_mistral(prompt, model=selected_model)
+    elif args.provider == "ollama":
+        return run_ollama(prompt, model=selected_model)
+
+
+def handle_template(template_file, model, index, chunk_id_to_text):
+    last_heading = ""
+    with open("user-guide.md", "w") as output:
+        with open(template_file, "r") as f:
+            for line in f.readlines():
+                if line.startswith(">"):
+                    query = line[1:]
+                    query += f"\n - The heading for this chapter should be '{last_heading}'"
+                    output.write(ask_ai(model, index, chunk_id_to_text, query))
+                elif line.startswith("#"):
+                    last_heading = line
+                    if line.startswith("# "):
+                        output.write(line)
+                else:
+                    output.write(line)
+
+
+def handle_guide(user_guide, model, index, chunk_id_to_text):
+    first_skipped = False
+    with open("user-guide-updated.md", "w") as output:
+        with open(user_guide, "r") as f:
+            last_chapter = ""
+            for line in f.readlines():
+                if line.startswith("## "):
+                    if last_chapter and first_skipped:
+                        print(last_chapter)
+                        resp = ask_ai_update(model, index, chunk_id_to_text, last_chapter)
+                        if resp[-1] != "\n":
+                            resp += "\n"
+                        if resp[-2] != "\n":
+                            resp += "\n"
+                        resp = resp.replace("ENDOF", "")
+                        output.write(resp)
+                        last_chapter = ""
+                    first_skipped = True
+                    last_chapter += line
+                else:
+                    last_chapter += line
+            resp = ask_ai_update(model, index, chunk_id_to_text, last_chapter)
+            if resp[-1] != "\n":
+                resp += "\n"
+            resp = resp.replace("ENDOF", "")
+            output.write(resp)
+
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    # Set default models if not provided
+    if args.provider == "chatgpt":
+        selected_model = args.model or "gpt-4-turbo"
+    elif args.provider == "mistral":
+        selected_model = args.model or "mistral-large-latest"
+    elif args.provider == "ollama":
+        selected_model = args.model or "mixtral:8x7b-text-v0.1-q2_K"
+
+
+    try:
+        # Load ID to text mapping
+        with open("chunk_mapping.json", "r") as f:
+            chunk_id_to_text = json.load(f)
+            # Convert keys to integers
+            chunk_id_to_text = {int(k): v for k, v in chunk_id_to_text.items()}
+        # Load FAISS index from disk
+        index = faiss.read_index("man_pages.index")
+        model = SentenceTransformer("all-mpnet-base-v2")
+    except:
+        # Break files into smaller text chunks (e.g. 500-character blocks with overlap).
+        # This is needed, because:
+        # - LLMs (even large ones) have limited input token size (e.g., ~8k–32k tokens).
+        # - Chunks allow efficient search and partial loading, making the system scalable.
+        # - Overlap ensures that no important concept gets cut off in the middle
+        #   (e.g., command + its description).
+        print("Loading and chunking docs from podman...")
+        chunks = load_and_chunk_docs("docs/source/markdown", 1000, 200)
+        chunks += load_and_chunk_docs("docs/tutorials", 1000, 200)
+        chunks += load_and_chunk_docs("docs/source", 1000, 200)
+
+        print("Loading and chunking docs from podman.io...")
+        os.system("rm -rf podman.io")
+        os.system("git clone https://github.com/containers/podman.io.git")
+        chunks += load_and_chunk_docs("podman.io/docs", 1000, 200)
+        chunks += load_and_chunk_docs("podman.io/blog", 1000, 200)
+
+        # What happens:
+        # Each text chunk is converted into a vector (a list of numbers) using
+        # a sentence embedding model like all-MiniLM-L6-v2.
+        # This is needed, because we want to search semantically - find chunks that mean
+        # the same thing as the query, not just keyword matches.
+        # These embeddings capture the meaning of each chunk in a numerical format that
+        # allows for similarity comparison.
+        print("Embedding docs...")
+        model = SentenceTransformer("all-mpnet-base-v2")
+        texts = [chunk[1] for chunk in chunks]
+        embeddings = model.encode(texts, convert_to_tensor=False, normalize_embeddings=True)
+
+        # Store the embeddings in the FAISS Index.
+        # FAISS stores the vectors in a special index that supports fast similarity search
+        # (e.g., by L2 distance or other similarity).
+        # This is needed, because we need a fast way to find the most relevant content for
+        # any given question (e.g., "how does podman run work?").
+        print("Generating FAISS index...")
+        dimension = embeddings[0].shape[0]
+        index = faiss.IndexFlatL2(dimension)  # Use IndexFlatIP for cosine similarity
+        index.add(np.array(embeddings))
+
+        # Create dict to map chunk index to content
+        chunk_id_to_text = {i: chunks[i][1] for i in range(len(chunks))}
+
+        # Save metadata (ID to text mapping)
+        with open("chunk_mapping.json", "w") as f:
+            json.dump(chunk_id_to_text, f)
+
+        # Store the faiss index to disk, so we can load it instead of generating it on every run.
+        faiss.write_index(index, "man_pages.index")
+
+    if os.path.exists(args.query):
+        if args.update:
+            handle_guide(args.query, model, index, chunk_id_to_text)
+        else:
+            handle_template(args.query, model, index, chunk_id_to_text)
+    else:
+        print(ask_ai(model, index, chunk_id_to_text, args.query))
