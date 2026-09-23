@@ -35,9 +35,12 @@ fedora-rawhide)
     TEST_BUILD_TAGS="containers_image_sequoia"
 
     # Use conmon-v3 as the default on Rawhide (https://github.com/containers/conmon-v3).
-    # WIP: refresh to the newest Rawhide RPM so CI exercises current fixes.
+    # WIP: force the current Rawhide RPM. The CI image may bake a build whose
+    # Release sorts *newer* than today's package (e.g. ...-3.202607... vs
+    # ...-1.202609...), so "dnf update" is a no-op and leaves the stale binary.
     # CI_DESIRED_CONMON is asserted by system/e2e info tests via `podman info`.
-    sudo dnf -y update --refresh conmon-v3
+    sudo dnf -y remove --noautoremove conmon-v3 || true
+    sudo dnf -y install --refresh conmon-v3
     rpm -q conmon-v3
     sudo mkdir -p /etc/containers/containers.conf.d
     sudo tee /etc/containers/containers.conf.d/90-conmon-v3.conf << EOF
