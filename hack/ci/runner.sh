@@ -34,9 +34,11 @@ fedora-rawhide)
     # Enable sequoia testing
     TEST_BUILD_TAGS="containers_image_sequoia"
 
-    # Use conmon-v3 already present in the Rawhide CI image as the default
-    # (https://github.com/containers/conmon-v3). CI_DESIRED_CONMON is asserted
-    # by system/e2e info tests via `podman info`.
+    # Use conmon-v3 as the default on Rawhide (https://github.com/containers/conmon-v3).
+    # WIP: refresh to the newest Rawhide RPM so CI exercises current fixes.
+    # CI_DESIRED_CONMON is asserted by system/e2e info tests via `podman info`.
+    sudo dnf -y update --refresh conmon-v3
+    rpm -q conmon-v3
     sudo mkdir -p /etc/containers/containers.conf.d
     sudo tee /etc/containers/containers.conf.d/90-conmon-v3.conf << EOF
 [engine]
