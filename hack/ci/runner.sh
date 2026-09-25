@@ -35,12 +35,18 @@ fedora-rawhide)
     TEST_BUILD_TAGS="containers_image_sequoia"
 
     # Use conmon-v3 as the default on Rawhide (https://github.com/containers/conmon-v3).
-    # WIP: force the current Rawhide RPM. The CI image may bake a build whose
-    # Release sorts *newer* than today's package (e.g. ...-3.202607... vs
-    # ...-1.202609...), so "dnf update" is a no-op and leaves the stale binary.
+    # WIP: Pin Packit COPR build for containers/conmon-v3#62 (e552ad1):
+    # https://dashboard.packit.dev/jobs/copr/4014911
+    # The CI image may bake a build whose Release sorts *newer* than repo
+    # packages (e.g. ...-3.202607... vs ...-1.202609...), so "dnf update" is a
+    # no-op; remove + install from the Packit COPR instead.
     # CI_DESIRED_CONMON is asserted by system/e2e info tests via `podman info`.
+    sudo dnf -y install 'dnf*-command(copr)'
+    sudo dnf -y copr enable packit/containers-conmon-v3-62 fedora-rawhide-x86_64
     sudo dnf -y remove --noautoremove conmon-v3 || true
-    sudo dnf -y install --refresh conmon-v3
+    sudo dnf -y install --refresh \
+        conmon-v3-3.0.0~dev-1.20260925103023022650.pr62.60.ge552ad1.fc46.x86_64
+    sudo dnf -y copr disable packit/containers-conmon-v3-62
     rpm -q conmon-v3
     sudo mkdir -p /etc/containers/containers.conf.d
     sudo tee /etc/containers/containers.conf.d/90-conmon-v3.conf << EOF
